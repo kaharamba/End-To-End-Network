@@ -69,7 +69,7 @@ def get_logging_files(log_dir: str, img_dir: str, new_log_folder: str):
         
         
     log_file.close() 
-    shutil.copyfile(log_dir + "log_file_" + str(log_file_cnt) + ".txt", new_folder_pth + "/logging_data/" + "log_file_" + str(log_file_cnt) + ".txt") 
+    shutil.copyfile(log_dir + "/log_file_" + str(log_file_cnt) + ".txt", new_folder_pth + "/logging_data/" + "log_file_" + str(log_file_cnt) + ".txt") 
 
 
 def main():

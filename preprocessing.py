@@ -13,31 +13,30 @@ transform = transforms.Compose([
 ]) 
 
 class data_processing: 
-    def __init__(self): 
-        self.image_path = "/Volumes/joeham/logging_camera_down/image_data/" 
-        self.logging_path = "/Volumes/joeham/logging_camera_down/logging_data/"
-        self.merge_log_file = "/Volumes/joeham/logging_camera_down/"
+    def __init__(self, image_path, logging_path, merge_log_file): 
+        self.image_path = image_path
+        self.logging_path = logging_path
+        self.merge_log_file = merge_log_file 
         self.count = 0
         self.image_used = [] 
         self.merge_log_files() 
         self.count_files()
     
-    
-    def merge_log_files(self) -> None: 
-        file_count = 0 
-
-        # Check if the logging path exists
+    def check_if_folders_exists(self) -> None: 
         if not os.path.exists(self.logging_path):
             print("Logging path doesn't exist")
-            raise IOError("%s: %s" % (self.logging_path, "Logging path doesn't exist")) 
+            raise IOError("%s: %s" % (self.logging_path, "Logging path doesn't exist, I assume to check path in training.py")) 
 
         if not os.path.exists(self.merge_log_file):
-            print("Directory for merged log file doesn't exist")
-            raise IOError("%s: %s" % (self.merge_log_file, "Merge file directory doesn't exist"))
-        
+            print("File for merged log file doesn't exist")
+            raise IOError("%s: %s" % (self.merge_log_file, "Merge file doesn't exist, I assume that you need to check path in training.py"))
+
         if os.path.exists(self.merge_log_file + "merged_log_file.txt") == True: 
-            print("Merge file exists already, returning") 
             return
+
+    def merge_log_files(self) -> None: 
+        file_count = 0 
+        self.check_if_folders_exists()
 
         file_names = [] 
 
@@ -87,14 +86,8 @@ class data_processing:
     def __getitem__(self, idx) -> tuple[torch.Tensor, torch.Tensor]:
         
         # Check if Image path and Logging path 
-        if not os.path.exists(self.image_path): 
-            print("Image path doesn't exist") 
-            raise IOError("%s: %s" % (self.image_path, "Image path doesn't exist")) 
+        self.check_if_folders_exists()
 
-        if not os.path.exists(self.merge_log_file + "merged_log_file.txt"): 
-            print("Logging path doesn't exist")  
-            raise IOError("%s: %s" % (self.logging_path, "Logging path doesn't exist")) 
-        
         line_req = None
         log_file = open(self.merge_log_file + "merged_log_file.txt"); 
         ran_idx = None
@@ -125,6 +118,7 @@ class data_processing:
         left_img = Image.open(left_img_name) 
 
         # Crop the image to remove any uneccesarry part of the vehicle
+        # front_img = right_img.crop((110, 0, 540, 450))
         front_img = right_img.crop((110, 0, 540, 450))
 
         # Convert to yuv image 
@@ -142,9 +136,9 @@ class data_processing:
         steering_val = int(line_arr[4]) 
         steering_val = 2 * ((steering_val - 451) / (573 - 451)) - 1 
         
-        steering = torch.tensor([steering_val], dtype=torch.float32) 
+        steering = torch.tensor(steering_val, dtype=torch.float32) 
 
-        return right_image_yuv, steering 
+        return front_image_yuv, steering 
         
 
 if __name__ == '__main__':

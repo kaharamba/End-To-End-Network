@@ -13,7 +13,7 @@ from torch import nn
 from PIL import Image
 
 
-EPOCH = 1000
+EPOCH = 100
 transform = transforms.Compose([
     transforms.ToTensor()
 ]) 
@@ -29,7 +29,7 @@ def eval_model():
     merge_folder = "/Volumes/joeham/valid_test_1/"
 
     data = preprocessing.data_processing(image_folder, logging_folder, merge_folder)
-    valid_dataloader = DataLoader(data, batch_size=1, shuffle=False)
+    valid_dataloader = DataLoader(data, batch_size=10, shuffle=False)
 
     epoch = 1
     correct = 0
@@ -88,7 +88,7 @@ def train():
     merge_folder = "/Volumes/joeham/logging_camera_down/"
 
     data = preprocessing.data_processing(image_folder, logging_folder, merge_folder)
-    train_dataloader = DataLoader(data, batch_size=1, shuffle=True)
+    train_dataloader = DataLoader(data, batch_size=5, shuffle=True)
 
 	# Load the Model
     model = End_to_End_NN()
@@ -108,6 +108,7 @@ def train():
 
         optimizer.zero_grad()
         output = model(front_img) 
+        steering = steering.unsqueeze(1)
 
         loss = loss_fn(output, steering) 
         accuracy = is_correct(steering, output)

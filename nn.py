@@ -41,7 +41,7 @@ class End_to_End_NN(nn.Module):
         x = F.relu(self.conv4(x))
         x = F.relu(self.conv5(x)) 
     
-        x = x.flatten()
+        x = x.flatten(start_dim=1)
 
         x = self.li1(x)
         x = self.li2(x)

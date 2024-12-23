@@ -12,7 +12,8 @@ def get_logging_files(log_dir: str, img_dir: str, new_log_folder: str):
         return: 
             None 
 
-        The purpose is to take one log file and depending on the selection, split it from the main folder containing all the data.        This allows for easier transportation and management for training models 
+        The purpose is to take one log file and depending on the selection, split it from the main folder containing all the data.        
+        This allows for easier transportation and management for training models 
     ''' 
     file_count = 0 
 

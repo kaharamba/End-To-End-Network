@@ -41,9 +41,41 @@ class ConvertToCsv:
             df.to_csv(self.csv_folder + "logging_data_csv.csv", header=None , mode="a")
             
             
+class CsvToText: 
+    def __init__(self, csv_folder, text_folder):
+        self.csv_folder = csv_folder 
+        self.text_folder = text_folder
+    
+    def convert(self): 
+        if os.path.exists(self.csv_folder + "normalized_csv.csv") == False: 
+            print("Error")
+            return 
+
+        csv_file = open(self.csv_folder + "normalized_csv.csv")
+        txt_file = open(self.text_folder + "normalized_logging_for_camera_down.txt", "w")
+
+        idx = 0
+        for line in csv_file: 
+            if idx == 0: 
+                idx += 1
+                continue 
+
+            line = line.replace(",", " ")
+            line = line.split(" ")
+            txt_file.write(" ".join(line[2:]))
+
+            idx += 1
+
+        csv_file.close() 
+        txt_file.close()
+        
+        
 if __name__ == '__main__': 
-    csv_manager = ConvertToCsv("/Volumes/joeham/logging_camera_down/", "/Volumes/joeham/logging_camera_down/")
-    csv_manager.convert()
+    # csv_manager = ConvertToCsv("/Volumes/joeham/logging_camera_down/", "/Volumes/joeham/logging_camera_down/")
+    # csv_manager.convert()
+    
+    txt_manager = CsvToText("/Volumes/joeham/", "/Volumes/joeham/")
+    txt_manager.convert()
 
         
         

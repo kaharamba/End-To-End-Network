@@ -1,0 +1,298 @@
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from collections import OrderedDict
+from pathlib import Path
+import pandas as pd
+from PIL import Image
+import torchvision.transforms as transforms
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
+from multiprocessing import freeze_support
+import matplotlib.pyplot as plt
+
+# Device configuration
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Hyperparameters
+params = OrderedDict(
+    lr=[0.0001],  
+    batch_size=[256], 
+    num_workers=[4],
+    device=device,
+)
+
+# --- RGB to YCbCr Conversion Function ---
+def rgb_to_ycbcr(image: torch.Tensor) -> torch.Tensor:
+    r"""Convert an RGB image to YCbCr.
+
+    Args:
+        image (torch.Tensor): RGB image to be converted to YCbCr.
+
+    Returns:
+        torch.Tensor: YCbCr version of the image.
+    """
+    if not torch.is_tensor(image):
+        raise TypeError("Input type is not a torch.Tensor. Got {}".format(type(image)))
+    if len(image.shape) < 3 or image.shape[-3] != 3:
+        raise ValueError("Input size must have a shape of (*, 3, H, W) or (3, H, W). Got {}"
+                         .format(image.shape))
+
+    r = image[0, :, :]
+    g = image[1, :, :]
+    b = image[2, :, :]
+
+    delta = 0.5
+    y = 0.299 * r + 0.587 * g + 0.114 * b
+    cb = (b - y) * 0.564 + delta
+    cr = (r - y) * 0.713 + delta
+    # Return tensor in shape (3, H, W) in YCbCr order
+    return torch.stack((y, cb, cr), dim=0)
+
+
+# --- Dataset using only the front camera image ---
+class CPP_dataset(Dataset):
+    def __init__(self, file_path, image_dir, transform=None):
+        data = pd.read_csv(file_path, header=None)
+        data = data.fillna("")
+        data = data.astype(str)
+
+        self.image_paths = []
+        for row in data.values:
+            img_path = os.path.join(image_dir, row[0])
+            if os.path.exists(img_path):
+                self.image_paths.append(img_path)
+            else:
+                print(f"Skipping invalid row: {row} (image file missing)")
+
+        # Convert steering angles to numeric values; default to 0 if invalid
+        self.angles = data.iloc[:, 3].apply(pd.to_numeric, errors='coerce').fillna(0).values.astype(np.float32)
+        # Normalize steering angles to [-1, 1]
+        self.angles = (self.angles - self.angles.min()) / (self.angles.max() - self.angles.min()) * 2 - 1
+
+        self.n_samples = len(self.image_paths)
+        self.transform = transform
+
+    def __getitem__(self, index):
+        orig_img = Image.open(self.image_paths[index]).convert('RGB')
+
+        # Calculate crop dimensions: 1/3 of the original image size.
+        orig_width, orig_height = orig_img.size
+        crop_width, crop_height = orig_width // 3, orig_height // 3
+
+        # Center crop the image using the computed dimensions.
+        center_crop = transforms.CenterCrop((crop_height, crop_width))
+        cropped_img = center_crop(orig_img)
+
+        if self.transform:
+            image = self.transform(cropped_img)
+        else:
+            image = cropped_img
+
+        angle = torch.tensor(self.angles[index], dtype=torch.float32)
+        return image, angle
+
+    def __len__(self):
+        return self.n_samples
+
+
+# --- Model ---
+class EndToEnd(nn.Module):
+    def __init__(self):
+        super(EndToEnd, self).__init__()
+
+        self.normalize = nn.BatchNorm2d(3)  # Normalize across the 3 channels
+
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(256, 512, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Conv2d(512, 512, kernel_size=3, stride=1),
+            nn.ReLU()
+        )
+
+        self.fc_layers = nn.Sequential(
+            nn.Linear(512 * 1 * 18, 1164),
+            nn.ReLU(),
+            nn.Dropout(0.5),  # Add dropout
+            nn.Linear(1164, 100),
+            nn.ReLU(),
+            nn.Dropout(0.5),  # Add dropout
+            nn.Linear(100, 50),
+            nn.ReLU(),
+            nn.Linear(50, 10),
+            nn.ReLU(),
+            nn.Linear(10, 1)
+        )
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.normalize(x)
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc_layers(x)
+
+        return x
+
+
+# --- Checkpoint functions ---
+def save_checkpoint(epoch, model, optimizer, loss, path):
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+    }, path)
+
+
+def load_checkpoint(model, optimizer, path):
+    checkpoint = torch.load(path)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    epoch = checkpoint['epoch']
+    loss = checkpoint['loss']
+    return epoch, loss
+
+
+# --- Training and Validation Loops ---
+def train_one_epoch(epoch_index, dataloader, writer, model, optimizer, loss_fn):
+    model.train()
+    running_loss = 0.0
+
+    for i, (inputs, angles) in enumerate(dataloader):
+        inputs = inputs.to(device)
+        angles = angles.to(device).unsqueeze(1)
+
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = loss_fn(outputs, angles)
+        loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        running_loss += loss.item()
+        tb_x = epoch_index * len(dataloader) + i
+        writer.add_scalar('Loss/train', loss.item(), tb_x)
+
+        if i % 10 == 0:
+            print(f'[Epoch {epoch_index}, Batch {i}] loss: {running_loss / (i + 1):.3f}')
+
+    avg_loss = running_loss / len(dataloader)
+    return avg_loss
+
+def validate_one_epoch(dataloader, model, loss_fn):
+    model.eval()
+    running_loss = 0.0
+
+    with torch.no_grad():
+        for inputs, angles in dataloader:
+            inputs = inputs.to(device)
+            angles = angles.to(device).unsqueeze(1)
+            outputs = model(inputs)
+            loss = loss_fn(outputs, angles)
+            running_loss += loss.item()
+
+    avg_loss = running_loss / len(dataloader)
+    return avg_loss
+
+def main():
+    transform = transforms.Compose([
+        transforms.Resize((66, 200)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2),
+        transforms.ToTensor(),
+        transforms.Lambda(rgb_to_ycbcr)
+    ])
+
+    # File path and image directory
+    file_path = 'file_path'
+    image_dir = 'file_path'
+
+    train_dataset = CPP_dataset(file_path=file_path, image_dir=image_dir, transform=transform)
+    train_dataloader = DataLoader(train_dataset, batch_size=params['batch_size'][0],
+                                  shuffle=True, num_workers=params['num_workers'][0])
+
+    val_dataset = CPP_dataset(file_path=file_path, image_dir=image_dir, transform=transform)
+    val_dataloader = DataLoader(val_dataset, batch_size=params['batch_size'][0],
+                                shuffle=False, num_workers=params['num_workers'][0])
+
+    return train_dataloader, val_dataloader
+
+
+# --- Main Execution Logic ---
+def run():
+    model = EndToEnd().to(device)
+    loss_fn = nn.SmoothL1Loss()
+    optimizer = optim.Adam(model.parameters(), lr=params['lr'][0])
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, verbose=True)
+
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    writer = SummaryWriter(f'runs/fashion_trainer_{timestamp}')
+
+    train_dataloader, val_dataloader = main()
+
+    best_loss = float('inf')
+    checkpoint_dir = Path("checkpoints")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    patience = 5
+    epochs_without_improvement = 0
+
+    for epoch in range(50):
+        print(f'Epoch {epoch + 1}/50')
+
+        train_loss = train_one_epoch(epoch, train_dataloader, writer, model, optimizer, loss_fn)
+        val_loss = validate_one_epoch(val_dataloader, model, loss_fn)
+        writer.add_scalar('Loss/val_avg', val_loss, epoch)
+
+        if val_loss < best_loss:
+            best_loss = val_loss
+            epochs_without_improvement = 0
+            best_model_path = checkpoint_dir / "best_model_YVC.pth"
+            save_checkpoint(epoch, model, optimizer, val_loss, best_model_path)
+            print(f"New best model saved with validation loss: {best_loss:.4f}")
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= patience:
+                print(f"Early stopping at epoch {epoch + 1}")
+                break
+
+        scheduler.step(val_loss)
+
+    # Save the final model
+    final_model_path = checkpoint_dir / "final_model.pth"
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': val_loss,
+    }, final_model_path)
+    print(f"Final model saved at {final_model_path}")
+
+    writer.close()
+
+
+if __name__ == '__main__':
+    freeze_support()
+    run()
+
